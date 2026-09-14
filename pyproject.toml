@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toolwake"
+version = "0.1.0"
+description = "Simulate a depositing tool travelling a toolpath, accumulate the material it leaves in its wake, and check the tool against it."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Zane Bates", email = "zanetbates1@gmail.com" }]
+keywords = ["3d-printing", "non-planar", "bioprinting", "collision", "toolpath", "robotics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = ["numpy>=1.21"]
+
+[project.optional-dependencies]
+render = ["matplotlib>=3.5"]
+dev = ["pytest>=7", "matplotlib>=3.5"]
+
+[project.scripts]
+toolwake = "toolwake.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/zbates1/toolwake"
+Issues = "https://github.com/zbates1/toolwake/issues"
+Changelog = "https://github.com/zbates1/toolwake/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
