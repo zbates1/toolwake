@@ -14,3 +14,7 @@ examples/*.gif
 examples/*.html
 examples/*.json
 examples/vessel_iso.png
+
+# Local secrets (PyPI tokens etc). Never commit.
+.env
+.env.*

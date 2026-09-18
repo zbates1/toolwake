@@ -5,6 +5,7 @@ should, and stay quiet on one it shouldn't". Both directions are checked,
 because a clearance test that never fires is indistinguishable from one that
 works until the day it matters.
 """
+import time
 import numpy as np
 import pytest
 
@@ -659,3 +660,78 @@ def test_asgi_routes_shape():
     assert set(routes) == {"/view", "/version", "/report.json"}
     body, ctype = routes["/view"]()
     assert ctype.startswith("text/html") and "location.reload" in body
+
+
+# ── Broad-phase cost ────────────────────────────────────────────────────────
+# These exist because a real quadratic blow-up hid behind a spatial hash that
+# was working perfectly, and NOT ONE existing test noticed. Every check here
+# is about how much work a query does, which is invisible to any assertion
+# about what a query returns.
+
+
+def test_query_examines_no_more_cells_than_necessary():
+    """A query must cost min(cells in its box, cells that hold material).
+
+    The tool's bounding box includes the luer housing, 130 mm across, while
+    the grid is sized for a 45 um bead. Enumerating that box walked ~5 000
+    cells per query to find a few hundred occupied ones — 43.8 million dict
+    lookups over one 1 747-row toolpath, and 86% of total runtime.
+    """
+    d = Deposit(bead_radius=45e-6, cell=5e-3)
+    for i in range(20):
+        a = np.array([1e-3 * i, 0.0, 0.0])
+        d.add(a, a + np.array([5e-4, 0, 0]), frame=i)
+
+    occupied = len(d._grid)
+
+    # A housing-sized query: vastly more cells in the box than hold material.
+    big = Box(np.zeros(3), (0.065, 0.0375, 0.036))   # the 130x75x72 mm housing
+    lo, hi = big.bounds(pad=0.02)
+    d._candidates(lo, hi)
+    box_cells = 1
+    for x in (np.floor(hi / d.cell) - np.floor(lo / d.cell) + 1):
+        box_cells *= int(x)
+    assert box_cells > occupied, "fixture no longer exercises the large-box case"
+    assert d.last_probe == occupied, (
+        f"walked {d.last_probe} cells when only {occupied} hold material")
+
+    # A needle-sized query: the box is smaller than the occupied set, so
+    # enumerating it is the cheaper way round and must still be chosen.
+    small = Capsule(np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 2e-3]), 1e-4)
+    lo, hi = small.bounds(pad=1e-3)
+    d._candidates(lo, hi)
+    assert d.last_probe < occupied
+
+
+def test_query_cost_does_not_scale_with_deposit_size():
+    """Cost must follow the CANDIDATES, not the size of the whole wake.
+
+    Storing segments in Python lists and indexing them with
+    `np.asarray(self._a)[cand]` rebuilt an array of the entire deposit on
+    every query. With the candidate count pinned at 2, a query went from
+    673 us at 500 segments to 12.5 ms at 16 000 — pure deposit-size cost,
+    none of it real work, and quadratic over a sweep.
+    """
+    def probe_time(n):
+        d = Deposit(bead_radius=45e-6, cell=5e-3)
+        # 2 cm apart, so each segment owns its own cells and a probe at the
+        # origin can only ever see the first couple.
+        for i in range(n):
+            a = np.array([0.02 * i, 0.0, 0.0])
+            d.add(a, a + np.array([1e-3, 0, 0]), frame=i)
+        shape = Capsule(np.array([0.0, 0.0, 2e-3]),
+                        np.array([0.0, 0.0, 1.2e-2]), 2e-4)
+        d.clearance(shape, frame=n + 1, lag=10, search=0.02)   # warm up
+        t0 = time.perf_counter()
+        for _ in range(50):
+            d.clearance(shape, frame=n + 1, lag=10, search=0.02)
+        return (time.perf_counter() - t0) / 50
+
+    small = probe_time(1000)
+    large = probe_time(16000)
+    # 16x the deposit for the same 2 candidates. The old code was ~11x slower
+    # here; 4x leaves ample room for a loaded CI box without admitting a
+    # regression of that size.
+    assert large < small * 4, (
+        f"query cost tracks deposit size: {small * 1e6:.0f} us at 1k segments, "
+        f"{large * 1e6:.0f} us at 16k")
