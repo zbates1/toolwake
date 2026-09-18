@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "toolwake"
-version = "0.2.0"
+version = "0.2.1"
 description = "Simulate a depositing tool travelling a toolpath, accumulate the material it leaves in its wake, and check the tool against it."
 readme = "README.md"
 requires-python = ">=3.9"
