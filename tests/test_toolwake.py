@@ -812,3 +812,76 @@ def test_printing_above_a_previous_layer_is_not_a_collision():
     assert res.n_hits == 0, (
         f"{res.n_hits} rows called collisions on a clean two-layer raster; "
         f"worst {res.worst * 1e3:.4f} mm")
+
+
+def test_bead_cannot_be_taller_than_its_layer():
+    """A round bead of the bore diameter pokes up through the next layer.
+
+    The bead defaults to the needle's bore radius, which assumes it keeps the
+    cross-section it had inside the needle. Laid at a layer height smaller than
+    the bore, a round bead is taller than its own layer — so its top sits above
+    where the nozzle will be on the next pass, and rows that printed perfectly
+    report as collisions. On a 0.036 mm-layer slab with a 0.09 mm bore that was
+    498 rows, 391 of them blamed on material exactly one layer below.
+    """
+    layer, bore_r = 36e-6, 45e-6
+    assert layer / 2 < bore_r, "fixture must have a layer thinner than the bore"
+
+    # The second layer is offset sideways by a raster pitch, so the previous
+    # layer's bead lands under the needle's WALL rather than under its bore.
+    # Directly under the bore it is inside the hole and correctly ignored —
+    # which is why this fixture has to be offset to reproduce anything.
+    pitch = 85e-6
+    assert bore_r < pitch < 95e-6, "pitch must put the bead under the wall"
+    pts, kinds = [], []
+    for k, z in enumerate((layer, 2 * layer)):
+        for x in range(14):
+            pts.append((x * 1e-3, k * pitch, z))
+            kinds.append(PRINT)
+    path = Toolpath.from_arrays(np.array(pts), kinds=np.array(kinds))
+    needle = Needle(inner_d=2 * bore_r)
+
+    round_bead = simulate(path, needle, lag=2, threshold=0.0)
+    squashed = simulate(path, needle, lag=2, threshold=0.0,
+                        bead_radius=layer / 2)
+
+    assert round_bead.n_hits > 0, (
+        "fixture no longer reproduces the artefact it exists to document")
+    assert squashed.n_hits == 0, (
+        f"a bead squashed to its layer still collides: {squashed.n_hits} rows, "
+        f"worst {squashed.worst * 1e3:.4f} mm")
+    # The clearance left is the half-layer of headroom under the nozzle.
+    assert squashed.worst == pytest.approx(layer / 2, rel=1e-6)
+
+
+def test_bead_sits_below_the_nozzle_face_not_on_the_path():
+    """A bead centred on the toolpath is half-embedded in the nozzle's plane.
+
+    Material leaving the bore fills the gap between the previous layer's top
+    and the nozzle face: it occupies [z - h, z], centred h/2 down. Centred on
+    the path instead, every bead straddles the plane the face travels in, so a
+    same-layer neighbour passing under the wall reports a collision of exactly
+    one bead radius — a tangent contact dressed up as a penetration. On the
+    reference slab that was 41 rows, every one at exactly -bead_radius.
+    """
+    layer = 36e-6
+    pitch = 85e-6           # neighbour lands under the wall, not the bore
+    pts, kinds = [], []
+    for lane in range(2):   # two adjacent lines in the SAME layer
+        for x in range(14):
+            pts.append((x * 1e-3, lane * pitch, layer))
+            kinds.append(PRINT)
+    path = Toolpath.from_arrays(np.array(pts), kinds=np.array(kinds))
+    needle = Needle(inner_d=90e-6)
+
+    on_path = simulate(path, needle, lag=2, threshold=0.0,
+                       bead_radius=layer / 2)
+    dropped = simulate(path, needle, lag=2, threshold=0.0,
+                       bead_radius=layer / 2, bead_drop=layer / 2)
+
+    assert on_path.n_hits > 0, "fixture no longer reproduces the artefact"
+    assert on_path.worst == pytest.approx(-layer / 2, rel=1e-6), (
+        "the artefact should be exactly one bead radius — a tangent contact")
+    assert dropped.n_hits == 0, (
+        f"bead dropped to its layer still collides: {dropped.n_hits} rows, "
+        f"worst {dropped.worst * 1e3:.4f} mm")

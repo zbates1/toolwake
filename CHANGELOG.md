@@ -25,21 +25,36 @@ it does not have, and both made it collide with the print it was making.
   accepted `inner_d` and silently discarded it, which is how the bore went
   missing.
 
-On the three reference toolpaths, rows reported as penetrating:
+- **The bead was modelled round at the bore diameter, so it was taller than
+  its own layer.** A bead laid at layer height h is squashed to h and spreads
+  sideways; kept round it pokes up through where the nozzle will sit on the
+  next pass. On a 0.036 mm-layer slab with a 0.09 mm bore that was 498 rows
+  reported, 391 of them blamed on material exactly one layer below.
+- **The bead was centred on the toolpath, i.e. in the nozzle tip's own plane.**
+  Material leaving the bore fills the gap between the previous layer's top and
+  the nozzle face, occupying [z - h, z] — its centre is h/2 down. Straddling
+  the face's plane instead, any same-layer neighbour passing under the wall
+  reported a collision of exactly one bead radius: tangent contacts dressed up
+  as penetrations, 41 of them on the same slab.
 
-| toolpath | 0.1.1 | flat tip | + open bore |
-|---|---|---|---|
-| LightPipeRobotTest | 7 | 2 | **0** |
-| test_infill | 2 193 | 16 | **0** |
-| small_slab | 1 224 | 1 218 | 498 |
+  `simulate` now takes `bead_radius` and `bead_drop`. Passing `h/2` for both
+  makes the bead exactly fill its layer, tangent to the face that laid it.
+  Explicit arguments rather than inferred: only the caller knows the process.
 
-`small_slab` is not a geometry artefact: its layer height is 0.036 mm while a
-bead is modelled as a cylinder of the full 0.09 mm bore. A bead 2.5x thicker
-than the layer it sits in will intersect the nozzle no matter how the tool is
-shaped. Squashing the bead to the layer height is a separate change.
+Rows reported as penetrating, through all four fixes:
+
+| toolpath | 0.1.1 | flat tip | + bore | + bead |
+|---|---|---|---|---|
+| LightPipeRobotTest | 7 | 2 | 0 | **0** |
+| test_infill | 2 193 | 16 | 0 | **0** |
+| small_slab | 1 224 | 1 218 | 498 | **0** |
+
+Every G-code file in the reference set now reports clear.
 
 ### Added
 - `Cylinder` — flat-ended, optionally hollow, exact signed distance.
+- `simulate(bead_radius=..., bead_drop=...)` — the laid bead's size and where
+  it sits relative to the nozzle face.
 - `toolwake --version` (also `-V` and `-v`). The CLI had no way to report its
   own version: `toolwake -v` failed with "the following arguments are
   required: source", which reads as a usage mistake rather than a missing

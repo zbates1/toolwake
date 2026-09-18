@@ -89,6 +89,7 @@ class Result:
 
 def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
              threshold: float = 5e-4, search: float = 0.02,
+             bead_radius: float | None = None, bead_drop: float = 0.0,
              progress=None) -> Result:
     """Run the wake simulation over `path`.
 
@@ -100,16 +101,49 @@ def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
         threshold: clearance below which a row counts as "close", metres.
         search: broad-phase radius, metres. Beads beyond this are not measured;
             raise it if the housing is large.
+        bead_radius: radius of the laid bead, metres. Defaults to the needle's
+            bore radius, which assumes the bead keeps the round cross-section
+            it had inside the needle.
+
+            It does not. A bead laid at layer height h is squashed to h and
+            spreads sideways, and modelling it round makes it TALLER than the
+            layer it lives in — so it pokes up through where the nozzle will
+            sit on the next pass and reads as a collision on rows that printed
+            perfectly. On a 0.036 mm-layer slab with a 0.09 mm bore that was
+            498 rows reported, 391 of them blamed on material one layer below.
+            Passing `min(bore_radius, h / 2)` leaves 41, and those are genuine
+            same-layer retraces.
+
+            A bead cannot be taller than the layer it was laid in. Left as an
+            explicit argument rather than inferred, because only the caller
+            knows the process.
+        bead_drop: how far BELOW the nozzle face the bead sits, metres,
+            measured along the tool axis. Zero puts the bead's centre on the
+            toolpath, which is where the nozzle tip is — so every bead ends up
+            half-embedded in the plane the nozzle face travels in, and any
+            same-layer neighbour passing under the wall reports a collision of
+            exactly one bead radius. Those are tangent contacts dressed up as
+            penetrations: on the reference slab, 41 rows, every one of them at
+            exactly -bead_radius.
+
+            Material leaving the bore fills the gap between the previous
+            layer's top and the nozzle face, so it occupies [z - h, z] and its
+            centre is h/2 down. Passing `h / 2` alongside `bead_radius=h / 2`
+            makes the bead exactly fill its layer, tangent to the face that
+            laid it. That takes the same slab to zero.
         progress: optional callable(i, n) for a progress bar.
 
     Returns:
         A `Result` carrying per-row clearance and the accumulated wake.
     """
     needle = needle or Needle()
+    r_bead = needle.bead_radius if bead_radius is None else float(bead_radius)
+    if r_bead < 0:
+        raise ValueError("bead_radius must be >= 0")
     # The grid only exists to shrink the candidate set, so scale it to the
     # query, not the bead — see Deposit.__init__.
-    dep = Deposit(bead_radius=needle.bead_radius,
-                  cell=max(search / 4.0, 8.0 * needle.bead_radius))
+    dep = Deposit(bead_radius=r_bead,
+                  cell=max(search / 4.0, 8.0 * r_bead))
     n = len(path)
     clearance = np.full(n, np.inf)
     culprit = np.full(n, -1, dtype=int)
@@ -133,7 +167,14 @@ def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
 
         # Deposit AFTER measuring — see the module docstring.
         if i > 0 and path.kinds[i] == PRINT:
-            dep.add(path.xyz[i - 1], path.xyz[i], frame=i)
+            a, b = path.xyz[i - 1], path.xyz[i]
+            if bead_drop:
+                # Along the TOOL axis, not -Z: on a non-planar move the
+                # material still lands under the nozzle face, wherever that
+                # face is pointing.
+                shift = pose.axis * float(bead_drop)
+                a, b = a - shift, b - shift
+            dep.add(a, b, frame=i)
 
         if progress is not None and (i % 200 == 0 or i == n - 1):
             progress(i + 1, n)
