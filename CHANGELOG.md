@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `toolwake --version` (also `-V` and `-v`). The CLI had no way to report its
+  own version: `toolwake -v` failed with "the following arguments are
+  required: source", which reads as a usage mistake rather than a missing
+  feature.
+
 ## [0.1.1] — 2026-09-17
 
 Performance only. Every report is byte-identical to 0.1.0 — verified on three

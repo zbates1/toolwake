@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 
+from . import __version__
 from .simulate import simulate
 from .tool import Needle
 from .toolpath import Toolpath
@@ -24,6 +25,17 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="toolwake",
         description="Simulate a depositing tool and the wake it leaves behind.")
+    # A published tool has to be able to say which version it is without being
+    # handed work to do. -v as well as -V because -v is what people reach for
+    # first, and this tool has no verbosity levels to reserve it for.
+    #
+    # action="version" is load-bearing, not stylistic: it exits DURING parsing,
+    # before argparse checks that the required `source` positional is present.
+    # Read the flag out of the parsed namespace afterwards instead and
+    # `toolwake --version` fails with "the following arguments are required:
+    # source".
+    p.add_argument("-V", "-v", "--version", action="version",
+                   version=f"toolwake {__version__}")
     p.add_argument("source", help="a .gcode file, or 'helix' for the built-in demo")
     p.add_argument("-o", "--out", default="wake.mp4",
                    help="video output (.mp4 needs ffmpeg, .gif does not)")

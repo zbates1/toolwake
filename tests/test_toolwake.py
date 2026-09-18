@@ -735,3 +735,28 @@ def test_query_cost_does_not_scale_with_deposit_size():
     assert large < small * 4, (
         f"query cost tracks deposit size: {small * 1e6:.0f} us at 1k segments, "
         f"{large * 1e6:.0f} us at 16k")
+
+
+def test_cli_reports_its_version(capsys):
+    """`toolwake --version` must work WITHOUT being given a source.
+
+    `source` is a required positional, so this only works because argparse's
+    version action exits DURING parsing, before the required-argument check
+    runs. Declaration order is irrelevant — verified — but handling the flag
+    after `parse_args()` instead breaks it, and the failure is confusing:
+
+        toolwake: error: the following arguments are required: source
+
+    which reads as a usage mistake rather than a missing feature.
+
+    Compared against toolwake.__version__ rather than a literal, so a release
+    cannot leave this test asserting last version's number.
+    """
+    from toolwake import __version__
+    from toolwake.cli import main
+
+    for flag in ("-v", "-V", "--version"):
+        with pytest.raises(SystemExit) as e:
+            main([flag])
+        assert e.value.code == 0, f"{flag} should exit 0"
+        assert capsys.readouterr().out.strip() == f"toolwake {__version__}"
