@@ -310,13 +310,17 @@ def to_html(result, out="wake.html", **kw):
     return out
 
 
-def to_html_str(result, *, max_frames=400, fps=20, title=None,
+def to_html_str(result, *, max_frames=400, max_beads=20000, fps=20, title=None,
                 show_housing=True, live_poll=None):
     """Write a standalone interactive viewer for `result`.
 
     Buttons step between collision frames, the list jumps to any of them, and
     "jump to worst" goes straight to the deepest penetration — which is usually
     the only frame anyone actually wants to see.
+
+    `max_frames` and `max_beads` bound the size of the page. Both sample evenly
+    and both keep every collision regardless: the page exists to show what went
+    wrong, so that is the one thing decimation must never discard.
 
     The current frame is mirrored into the URL hash, so `file.html#f=506` or
     `file.html#worst` opens directly on a given row. That turns "look at the
@@ -353,8 +357,22 @@ def to_html_str(result, *, max_frames=400, fps=20, title=None,
            if c >= 0 and d < result.threshold}
     segs = dep.segments()
     t_of = np.asarray(dep._t) if len(dep) else np.zeros(0, dtype=int)
-    beads = [[*map(float, s[0]), *map(float, s[1]), int(t_of[j]), 1 if j in hot else 0]
-             for j, s in enumerate(segs)]
+
+    # Decimate the drawn wake, on the same rule as frames: sample evenly, and
+    # never drop a bead something collided with. Every segment is inlined into
+    # the page, so an unbounded wake is an unbounded page — a 2 674-row path
+    # gives 1.2 MB, and a 100 000-row one would give tens of megabytes that no
+    # iframe is going to enjoy. Purely cosmetic: the report is computed from
+    # the full deposit, and nothing on the page claims a bead count.
+    n_segs = len(segs)
+    if max_beads and n_segs > max_beads:
+        stride = int(np.ceil(n_segs / max_beads))
+        shown = sorted(set(range(0, n_segs, stride)) | hot)
+    else:
+        shown = range(n_segs)
+    beads = [[*map(float, segs[j][0]), *map(float, segs[j][1]),
+              int(t_of[j]), 1 if j in hot else 0]
+             for j in shown]
 
     frames = []
     for r in rows:

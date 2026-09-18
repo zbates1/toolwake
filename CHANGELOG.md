@@ -4,6 +4,22 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] — 2026-09-18
+
+Bounds the size of the viewer page. No reported number changes.
+
+### Fixed
+- **The viewer inlined every deposited bead, so the page grew without limit.**
+  Frames were capped at 400; beads were not capped at all. A 2 674-row path
+  already produces a 1.2 MB page, and a 100 000-row one would produce tens of
+  megabytes — which is a problem the moment anyone raises their row budget and
+  tries to embed the result in an iframe.
+
+  `to_html_str` now takes `max_beads` (default 20 000) and decimates the drawn
+  wake on the same rule as frames: sample evenly, and never drop a bead
+  something collided with. Purely cosmetic — the report is computed from the
+  full deposit, and nothing on the page claims a bead count.
+
 ## [0.2.1] — 2026-09-18
 
 Finishes 0.2.0. That release fixed the tool's geometry; this one fixes the

@@ -885,3 +885,38 @@ def test_bead_sits_below_the_nozzle_face_not_on_the_path():
     assert dropped.n_hits == 0, (
         f"bead dropped to its layer still collides: {dropped.n_hits} rows, "
         f"worst {dropped.worst * 1e3:.4f} mm")
+
+
+def test_viewer_bounds_the_wake_but_keeps_every_collision():
+    """The page inlines every bead, so an unbounded wake is an unbounded page.
+
+    A 2 674-row path already produces 1.2 MB; at the 100 000-row budget the
+    backend now allows, an uncapped wake would be tens of megabytes and no
+    iframe would enjoy it. Decimation samples evenly and keeps every bead
+    something collided with — the page exists to show what went wrong, so that
+    is the one thing it must never drop.
+    """
+    import json
+    import re
+
+    from toolwake.viewer import to_html_str
+
+    # A tight spiral so plenty of beads land near the tool and some collide.
+    path = Toolpath.helix(radius=0.004, pitch=2e-4, turns=12.0, per_turn=120)
+    res = simulate(path, Needle(inner_d=90e-6), lag=4, threshold=0.0)
+
+    def beads_of(html):
+        m = re.search(r'"beads":\s*(\[.*?\])\s*,\s*"', html, re.S)
+        assert m, "bead array not found in the page"
+        return json.loads(m.group(1))
+
+    full = beads_of(to_html_str(res, max_beads=0))
+    small = beads_of(to_html_str(res, max_beads=60))
+    assert len(full) > 200, "fixture is too small to exercise decimation"
+
+    n_hot = sum(1 for b in full if b[7])
+    assert len(small) <= 60 + n_hot, (
+        f"{len(small)} beads kept against a cap of 60 (+{n_hot} collisions)")
+    assert len(small) < len(full)
+    assert sum(1 for b in small if b[7]) == n_hot, (
+        "decimation dropped a bead that something collided with")
