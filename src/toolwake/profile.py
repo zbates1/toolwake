@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .geometry import Capsule
+from .geometry import Cylinder
 
 __all__ = ["Section", "ToolProfile", "luer_taper_tip", "blunt_cannula"]
 
@@ -33,12 +33,17 @@ class Section:
         r0: radius at the lower (tip-ward) end, metres.
         r1: radius at the upper end, metres. Defaults to `r0` (a cylinder).
         name: label, used in reports so a collision says which part hit.
+        r_inner: bore radius, metres. Non-zero makes the section a TUBE, which
+            is what a cannula is. Material under an open bore is in the hole,
+            not against the wall — model the needle solid and the layer it is
+            printing onto reads as a collision on every row.
     """
 
     length: float
     r0: float
     r1: float | None = None
     name: str = ""
+    r_inner: float = 0.0
 
     @property
     def r_top(self) -> float:
@@ -53,6 +58,12 @@ class Section:
             raise ValueError(f"section {self.name!r}: length must be >= 0")
         if self.r0 < 0 or self.r_top < 0:
             raise ValueError(f"section {self.name!r}: radii must be >= 0")
+        if self.r_inner < 0:
+            raise ValueError(f"section {self.name!r}: r_inner must be >= 0")
+        if self.r_inner >= min(self.r0, self.r_top) and self.r_inner > 0:
+            raise ValueError(
+                f"section {self.name!r}: r_inner ({self.r_inner}) must be "
+                f"smaller than the wall radius")
 
 
 class ToolProfile:
@@ -96,7 +107,13 @@ class ToolProfile:
         return np.asarray(out, dtype=float)
 
     def capsules(self, tip, axis, slices: int = 1):
-        """World-space capsules for collision, one (or `slices`) per section.
+        """World-space solids for collision, one (or `slices`) per section.
+
+        Returns flat-ended `Cylinder`s, NOT capsules, despite the name (kept
+        for compatibility). A capsule's hemispherical cap bulges a full radius
+        past its endpoint, which for the tip-most section means the model
+        occupies space below the nozzle that the needle does not — and the
+        material directly below the nozzle is the print. See `Cylinder`.
 
         Args:
             tip: world position of the tool tip.
@@ -106,7 +123,7 @@ class ToolProfile:
                 more tightly at proportional cost.
 
         Returns:
-            list of (name, Capsule).
+            list of (name, Cylinder).
         """
         tip = np.asarray(tip, dtype=float)
         axis = np.asarray(axis, dtype=float)
@@ -122,8 +139,8 @@ class ToolProfile:
                 ra = s.r0 + (s.r_top - s.r0) * t0
                 rb = s.r0 + (s.r_top - s.r0) * t1
                 out.append((s.name or "section",
-                            Capsule(tip + axis * za, tip + axis * zb,
-                                    max(ra, rb))))
+                            Cylinder(tip + axis * za, tip + axis * zb,
+                                     max(ra, rb), s.r_inner)))
             z += s.length
         return out
 
@@ -151,14 +168,21 @@ class ToolProfile:
 # calipers on the tip you are actually running.
 
 def blunt_cannula(gauge_od=0.19e-3, length=12.7e-3, inner_d=90e-6) -> ToolProfile:
-    """Just the metal tube — no hub. The optimistic model, for comparison."""
-    return ToolProfile([Section(length, gauge_od / 2.0, name="cannula")])
+    """Just the metal tube — no hub. The optimistic model, for comparison.
+
+    `inner_d` is the bore, and it is load-bearing: it was accepted and silently
+    discarded here, so the cannula was modelled as a solid rod. A solid rod has
+    no hole for the bead to come out of, and counts the layer it is printing
+    onto as an obstacle.
+    """
+    return ToolProfile([Section(length, gauge_od / 2.0, name="cannula",
+                                r_inner=inner_d / 2.0)])
 
 
 def luer_taper_tip(cannula_od=0.19e-3, cannula_len=12.7e-3,
                    hub_d=9.0e-3, hub_len=13.0e-3,
                    taper_len=3.0e-3, collar_d=11.0e-3,
-                   collar_len=4.0e-3) -> ToolProfile:
+                   collar_len=4.0e-3, inner_d=90e-6) -> ToolProfile:
     """A luer-lock dispensing tip: cannula, taper, hub, locking collar.
 
     Defaults approximate a 34G half-inch tip. The hub is roughly 47x the
@@ -172,9 +196,13 @@ def luer_taper_tip(cannula_od=0.19e-3, cannula_len=12.7e-3,
         hub_len: straight hub length, metres.
         taper_len: cone joining cannula to hub, metres.
         collar_d, collar_len: the luer locking collar above the hub.
+        inner_d: bore diameter, metres. Only the cannula is modelled hollow —
+            above it the lumen is a rounding error against a 9 mm hub, and
+            nothing that far up the tool is ever near a fresh bead.
     """
     return ToolProfile([
-        Section(cannula_len, cannula_od / 2.0, name="cannula"),
+        Section(cannula_len, cannula_od / 2.0, name="cannula",
+                r_inner=inner_d / 2.0),
         Section(taper_len, cannula_od / 2.0, hub_d / 2.0, name="taper"),
         Section(hub_len, hub_d / 2.0, name="hub"),
         Section(collar_len, collar_d / 2.0, name="luer collar"),

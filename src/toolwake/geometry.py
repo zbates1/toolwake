@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["Capsule", "Box", "rotation_from_rotvec", "rotvec_from_axis",
+__all__ = ["Capsule", "Cylinder", "Box", "rotation_from_rotvec", "rotvec_from_axis",
            "rpy_from_rotation"]
 
 
@@ -133,6 +133,85 @@ class Capsule:
 
     def __repr__(self):
         return f"Capsule(len={self.length:.4g}, r={self.radius:.4g})"
+
+
+class Cylinder:
+    """A cylinder with FLAT ends, optionally hollow: a tool section.
+
+    The difference from `Capsule` is the caps, and it is not cosmetic. A
+    capsule's hemispherical end bulges a full radius beyond its axis endpoint,
+    so a cannula modelled as one reaches `radius` BELOW the nozzle tip — into
+    space the needle does not occupy.
+
+    That produced a specific, confident wrong answer. On a 0.06 mm-layer print
+    with a 0.095 mm-radius cannula, the phantom hemisphere swallowed the two
+    layers directly underneath the nozzle on essentially every row: 2 193 of
+    2 674 rows reported as collisions, worst -0.14 mm, all blamed on the
+    cannula. With flat caps the same print's tightest clearance is +0.015 mm.
+    Material under the nozzle is what a print IS; a tool model must not treat
+    it as an obstacle.
+
+    `inner_radius` makes it a TUBE, which is what a cannula is. The bore is a
+    hole, so material sitting under it — the bead the nozzle is laying, and the
+    layer it is laying onto — is inside the hole, not touching the wall. Model
+    the needle as solid and every one of those reads as a collision.
+
+    Beads stay capsules — a short segment of extruded material really does have
+    rounded ends.
+    """
+
+    __slots__ = ("a", "b", "radius", "inner_radius")
+
+    def __init__(self, a, b, radius: float, inner_radius: float = 0.0):
+        self.a = np.asarray(a, dtype=float)
+        self.b = np.asarray(b, dtype=float)
+        self.radius = float(radius)
+        self.inner_radius = float(inner_radius)
+        if self.a.shape != (3,) or self.b.shape != (3,):
+            raise ValueError("cylinder endpoints must be 3-vectors")
+        if self.radius < 0:
+            raise ValueError("cylinder radius must be >= 0")
+        if self.inner_radius < 0:
+            raise ValueError("cylinder inner_radius must be >= 0")
+        if self.inner_radius >= self.radius > 0:
+            raise ValueError("cylinder inner_radius must be < radius")
+
+    def distance(self, pts) -> np.ndarray:
+        """Signed distance to the surface (negative inside), exact.
+
+        In (radial, axial) coordinates the solid is the rectangle
+        [inner_radius, radius] x [0, L], so this is the standard 2-D rectangle
+        SDF: outside, the hypotenuse of however far the point lies past the
+        wall and past the end; inside, the distance to whichever surface is
+        nearest, which is the LARGER (least negative) of the two.
+        """
+        pts = np.atleast_2d(np.asarray(pts, dtype=float))
+        ab = self.b - self.a
+        L = float(np.linalg.norm(ab))
+        if L < 1e-18:                       # degenerate -> a disc; treat as sphere
+            return np.linalg.norm(pts - self.a, axis=1) - self.radius
+        u = ab / L
+        rel = pts - self.a
+        t = rel @ u                                     # axial, 0..L is inside
+        radial = np.linalg.norm(rel - t[:, None] * u, axis=1)
+        dr = np.maximum(self.inner_radius - radial, radial - self.radius)
+        dz = np.maximum(-t, t - L)
+        outside = np.sqrt(np.maximum(dr, 0.0) ** 2 + np.maximum(dz, 0.0) ** 2)
+        return np.where((dr <= 0) & (dz <= 0), np.maximum(dr, dz), outside)
+
+    @property
+    def length(self) -> float:
+        return float(np.linalg.norm(self.b - self.a))
+
+    def bounds(self, pad: float = 0.0):
+        lo = np.minimum(self.a, self.b) - self.radius - pad
+        hi = np.maximum(self.a, self.b) + self.radius + pad
+        return lo, hi
+
+    def __repr__(self):
+        bore = (f", inner_radius={self.inner_radius:.4g}"
+                if self.inner_radius else "")
+        return f"Cylinder(a={self.a}, b={self.b}, radius={self.radius:.4g}{bore})"
 
 
 class Box:

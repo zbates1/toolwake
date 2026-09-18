@@ -4,9 +4,42 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-09-18
+
+Reported clearances change. The tool was modelled with two pieces of geometry
+it does not have, and both made it collide with the print it was making.
+
+### Fixed
+- **Tool sections were capsules, so the tool reached below its own tip.** A
+  capsule's hemispherical cap bulges a full radius past its endpoint, so a
+  0.095 mm-radius cannula occupied 0.095 mm of space beneath the nozzle — and
+  the space beneath the nozzle is the part. On a 0.06 mm-layer print that
+  swallowed the two layers underneath on nearly every row: 2 193 of 2 674 rows
+  reported as collisions, worst -0.14 mm, every one blamed on the cannula
+  (2 177 of them by material *below* the tip). Sections are now flat-ended
+  `Cylinder`s. Beads stay capsules: extruded material does have rounded ends.
+- **The cannula was modelled solid, so the bore counted as an obstacle.** A
+  needle is a tube. Material under an open bore — the bead being laid, and the
+  layer being laid onto — is in the hole, not against the wall. `Section` now
+  takes `r_inner` and `Cylinder` an `inner_radius`. `blunt_cannula` already
+  accepted `inner_d` and silently discarded it, which is how the bore went
+  missing.
+
+On the three reference toolpaths, rows reported as penetrating:
+
+| toolpath | 0.1.1 | flat tip | + open bore |
+|---|---|---|---|
+| LightPipeRobotTest | 7 | 2 | **0** |
+| test_infill | 2 193 | 16 | **0** |
+| small_slab | 1 224 | 1 218 | 498 |
+
+`small_slab` is not a geometry artefact: its layer height is 0.036 mm while a
+bead is modelled as a cylinder of the full 0.09 mm bore. A bead 2.5x thicker
+than the layer it sits in will intersect the nozzle no matter how the tool is
+shaped. Squashing the bead to the layer height is a separate change.
 
 ### Added
+- `Cylinder` — flat-ended, optionally hollow, exact signed distance.
 - `toolwake --version` (also `-V` and `-v`). The CLI had no way to report its
   own version: `toolwake -v` failed with "the following arguments are
   required: source", which reads as a usage mistake rather than a missing

@@ -760,3 +760,55 @@ def test_cli_reports_its_version(capsys):
             main([flag])
         assert e.value.code == 0, f"{flag} should exit 0"
         assert capsys.readouterr().out.strip() == f"toolwake {__version__}"
+
+
+# ── Tool solids are flat-ended ──────────────────────────────────────────────
+
+
+def test_tool_tip_does_not_reach_below_itself():
+    """The tip-most solid must not occupy space beneath the nozzle.
+
+    Tool sections were `Capsule`s, and a capsule's hemispherical cap bulges a
+    full radius past its endpoint. A 0.095 mm-radius cannula therefore reached
+    0.095 mm BELOW its own tip — into the layer it had just printed.
+
+    On a 0.06 mm-layer part that swallowed the layers directly underneath on
+    nearly every row: 2 193 of 2 674 rows reported as collisions, worst
+    -0.14 mm, every one blamed on the cannula. Material under the nozzle is
+    what a print IS, so a tool model must never count it as an obstacle.
+    """
+    prof = Needle(inner_d=90e-6).profile
+    r = prof.sections[0].r0
+    layer = 60e-6
+    assert layer < r, "fixture must have a layer thinner than the cannula radius"
+
+    (_, solid), *_ = prof.capsules([0.0, 0.0, layer], [0.0, 0.0, 1.0])
+    # A point one layer directly below the tip: the previous layer's bead.
+    d = float(solid.distance(np.array([[0.0, 0.0, 0.0]]))[0])
+    assert d > 0, (
+        f"tool reports the layer {layer * 1e3:.3f} mm beneath its tip as "
+        f"{d * 1e3:.4f} mm inside itself")
+    # At least the vertical gap. Not exactly it: the cannula is a TUBE, so a
+    # point on the axis is inside the bore and the nearest wall is the bore's
+    # bottom rim — sqrt(r_inner^2 + layer^2). Asserting the gap exactly would
+    # be asserting that the needle is solid.
+    assert d >= layer, f"{d * 1e3:.4f} mm is less than the {layer * 1e3:.3f} mm gap"
+    r_in = prof.sections[0].r_inner
+    assert d == pytest.approx(np.hypot(r_in, layer), rel=1e-9)
+
+
+def test_printing_above_a_previous_layer_is_not_a_collision():
+    """End to end: a plain two-layer raster must not come back red."""
+    layer = 60e-6
+    xy = [(x * 1e-3, 0.0) for x in range(12)]
+    pts, kinds = [], []
+    for z in (layer, 2 * layer):
+        for x, y in (xy if z == layer else xy[::-1]):
+            pts.append((x, y, z))
+            kinds.append(PRINT)
+    path = Toolpath.from_arrays(np.array(pts), kinds=np.array(kinds))
+
+    res = simulate(path, Needle(inner_d=90e-6), lag=2, threshold=1e-5)
+    assert res.n_hits == 0, (
+        f"{res.n_hits} rows called collisions on a clean two-layer raster; "
+        f"worst {res.worst * 1e3:.4f} mm")

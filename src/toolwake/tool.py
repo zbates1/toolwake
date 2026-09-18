@@ -88,7 +88,7 @@ class Needle:
         Extra keywords go to `profile.luer_taper_tip` — pass measured hub
         dimensions there rather than trusting the nominal defaults.
         """
-        prof = luer_taper_tip(**kw)
+        prof = luer_taper_tip(inner_d=inner_d, **kw)
         return cls(inner_d=inner_d, outer_d=prof.tip_radius * 2.0,
                    profile=prof, housing=housing)
 
