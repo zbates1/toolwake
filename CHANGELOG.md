@@ -4,6 +4,32 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] — 2026-09-18
+
+Touching is not penetrating. Reported collision counts change.
+
+### Fixed
+- **Exact tangency was reported as a collision, at random.** With
+  `bead_radius` and `bead_drop` both h/2 — the setting that makes a bead fill
+  its layer, which 0.2.1 introduced — a same-layer neighbour passing under the
+  nozzle wall sits at a clearance of EXACTLY zero. Which side of zero each one
+  lands on is rounding, not geometry.
+
+  On a real 36 305-row part that put **4 677 rows, 12.9% of the file**, on the
+  wrong side and reported them as collisions. Every one was blamed on the
+  cannula, every culprit bead was a same-layer neighbour 0.066–0.093 mm away
+  laterally — under the wall, outside the bore — and every penetration depth
+  printed as `-0.0000 mm`.
+
+  `Result.n_hits` and `Result.status` now ignore anything shallower than
+  `CONTACT_TOL` (1e-12 m), which is six orders of magnitude above
+  double-precision noise on metre-scale coordinates and seven below anything
+  this models. `report()` reports such a row as `0.0` rather than `-0.0`.
+- **A zero threshold reported tangencies as "close".** With no warning band,
+  a clearance of -1e-13 satisfied both "not penetrating" and "below the
+  threshold", so a clean result came back as `warn`. A threshold of zero now
+  means what it says: only penetration counts.
+
 ## [0.2.2] — 2026-09-18
 
 Bounds the size of the viewer page. No reported number changes.

@@ -19,7 +19,7 @@ from .profile import Section, ToolProfile, blunt_cannula, luer_taper_tip
 from .tool import Needle, ToolPose
 from .toolpath import PRINT, TRAVEL, Toolpath
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 __all__ = [
     "Toolpath", "PRINT", "TRAVEL",

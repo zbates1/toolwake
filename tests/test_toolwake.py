@@ -920,3 +920,32 @@ def test_viewer_bounds_the_wake_but_keeps_every_collision():
     assert len(small) < len(full)
     assert sum(1 for b in small if b[7]) == n_hot, (
         "decimation dropped a bead that something collided with")
+
+
+def test_touching_is_not_penetrating():
+    """A tangency must not be reported as a collision.
+
+    Tangency is the designed-for case, not an edge case: with `bead_radius` and
+    `bead_drop` both h/2 a bead exactly fills its layer, so a same-layer
+    neighbour passing under the nozzle wall sits at a clearance of EXACTLY
+    zero. Which side of zero each one lands on is rounding.
+
+    On a real 36 305-row part that put 4 677 rows — 12.9% of the file — on the
+    wrong side and reported them as collisions, every one at a depth that
+    printed as -0.0000 mm.
+    """
+    from toolwake.simulate import CONTACT_TOL
+
+    path = Toolpath.helix(radius=0.01, pitch=5e-4, turns=2.0, per_turn=60)
+    res = simulate(path, Needle(inner_d=90e-6), lag=4, threshold=0.0)
+
+    res.clearance = np.array([1e-3, 0.0, -CONTACT_TOL / 10, +CONTACT_TOL / 10,
+                              -1e-6, -2e-3])
+    assert res.n_hits == 2, "only the two real penetrations should count"
+    assert res.status == "collision"
+
+    res.clearance = np.array([1e-3, 0.0, -CONTACT_TOL / 10, +CONTACT_TOL / 10])
+    assert res.n_hits == 0, "sub-picometre contact is not a penetration"
+    assert res.status == "ok"
+    # ...and the report must not show a tangency as a negative clearance.
+    assert res.report()["min_clearance_mm"] == 0.0

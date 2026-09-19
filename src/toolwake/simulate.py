@@ -23,6 +23,21 @@ from .toolpath import PRINT, Toolpath
 
 __all__ = ["Result", "simulate"]
 
+# Below this, a negative clearance is not a penetration — it is a tangency that
+# lost a coin-flip on the sign bit, metres.
+#
+# Tangency is not an edge case here, it is the designed-for case: with
+# `bead_radius` and `bead_drop` both h/2 a bead exactly fills its layer, so a
+# same-layer neighbour passing under the nozzle wall sits at a clearance of
+# EXACTLY zero. Whether each one lands at +0, -1e-18 or +1e-18 is rounding.
+#
+# On a real 36 305-row part that put 4 677 rows — 12.9% of the file — on the
+# wrong side of zero and reported them as collisions, every one at a depth that
+# printed as -0.0000 mm. A picometre is six orders of magnitude above
+# double-precision noise on metre-scale coordinates and seven below anything
+# this models, so nothing physical can hide beneath it.
+CONTACT_TOL = 1e-12
+
 
 @dataclass
 class Result:
@@ -45,13 +60,25 @@ class Result:
 
     @property
     def n_hits(self) -> int:
-        """Rows where the tool actually penetrates deposited material."""
-        return int(np.sum(self.clearance < 0))
+        """Rows where the tool actually penetrates deposited material.
+
+        Touching is not penetrating — see CONTACT_TOL.
+        """
+        return int(np.sum(self.clearance < -CONTACT_TOL))
 
     @property
     def n_close(self) -> int:
-        """Rows inside the warning band but not penetrating."""
-        return int(np.sum((self.clearance >= 0) & (self.clearance < self.threshold)))
+        """Rows inside the warning band but not penetrating.
+
+        A threshold of zero means there is no warning band — only penetration
+        counts. Without the guard, a tangency at -1e-13 satisfies both
+        "not penetrating" and "below zero" and gets reported as close, so a
+        result with nothing wrong with it comes back as a warning.
+        """
+        if self.threshold <= 0:
+            return 0
+        return int(np.sum((self.clearance >= -CONTACT_TOL)
+                          & (self.clearance < self.threshold)))
 
     @property
     def status(self) -> str:
@@ -64,6 +91,10 @@ class Result:
     def report(self) -> dict:
         """A JSON-ready summary, shaped like a clearance report."""
         w = self.worst
+        # A tangency rounds to "-0.0", which looks like a penetration sitting
+        # in a report that has just said there were none.
+        if np.isfinite(w) and abs(w) <= CONTACT_TOL:
+            w = 0.0
         i = int(np.argmin(np.where(np.isfinite(self.clearance),
                                    self.clearance, np.inf)))
         return {
