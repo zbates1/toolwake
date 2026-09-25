@@ -949,3 +949,55 @@ def test_touching_is_not_penetrating():
     assert res.status == "ok"
     # ...and the report must not show a tangency as a negative clearance.
     assert res.report()["min_clearance_mm"] == 0.0
+
+
+def test_grid_cell_does_not_follow_the_search_radius():
+    """Cell size must depend on the TOOL, not on `search`.
+
+    Tying them together welded two opposing costs to one knob: shrinking
+    `search` cut candidates per query 36x (949 -> 26) but grew the cells
+    walked per query 1000x (8 -> 7 913), because the cell shrank with it.
+    Below about 5 mm the second swamped the first and asking for a tighter
+    search radius made the whole sweep slower — the opposite of the point.
+    """
+    path = Toolpath.helix(radius=0.01, pitch=1e-3, turns=3.0, per_turn=60)
+    needle = Needle.luer(inner_d=90e-6)
+
+    wide = simulate(path, needle, lag=4, threshold=0.0, search=0.02)
+    tight = simulate(path, needle, lag=4, threshold=0.0, search=0.001)
+
+    assert wide.deposit.cell == tight.deposit.cell, (
+        f"cell moved with search: {wide.deposit.cell} vs {tight.deposit.cell}")
+
+    # And it should be sized against the tool's own width — the collar, here.
+    span = 2.0 * max(sec.r_max for sec in needle.profile.sections)
+    expected = max(span / 4.0, 8.0 * needle.bead_radius)
+    assert wide.deposit.cell == pytest.approx(expected)
+
+    # Narrowing the search must not change the verdict, only the work done.
+    assert wide.n_hits == tight.n_hits
+
+
+def test_narrowing_the_search_radius_prunes_work():
+    """A tighter search must measure strictly fewer beads, not more."""
+    path = Toolpath.helix(radius=0.01, pitch=1e-3, turns=3.0, per_turn=60)
+    needle = Needle.luer(inner_d=90e-6)
+
+    seen = {}
+    from toolwake.geometry import Cylinder
+    original = Cylinder.distance
+
+    def counted(self, pts, _key=None):
+        seen[key] = seen.get(key, 0) + len(np.atleast_2d(pts))
+        return original(self, pts)
+
+    try:
+        Cylinder.distance = counted
+        for key in ("wide", "tight"):
+            simulate(path, needle, lag=4, threshold=0.0,
+                     search=0.02 if key == "wide" else 0.001)
+    finally:
+        Cylinder.distance = original
+
+    assert seen["tight"] < seen["wide"], (
+        f"tight search measured {seen['tight']} points, wide {seen['wide']}")

@@ -4,6 +4,51 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-09-24
+
+Performance. Verdicts are unchanged on every file tested; reported clearances
+for DISTANT material are not, which is why this is a minor rather than a patch.
+
+### Changed
+- **`search` default 0.02 → 0.002 m.** Twenty millimetres of padding around
+  every query meant that on a 10 mm part the query box covered the whole
+  thing and the spatial hash could prune nothing: 949 candidate beads per
+  query against a wake of 2 046, and 99.2% of the 30 million point-distance
+  evaluations were against material nowhere near the tool.
+
+  Detection is unaffected — 2 mm is still more than forty times the largest
+  bead radius. What changes is that a clearance larger than `search` now
+  reports `inf` instead of a number, so anything printing at a much larger
+  scale wants this raised.
+- **Grid cell size now follows the TOOL, not `search`.** They were tied
+  (`cell = search / 4`), which welded two opposing costs to one knob:
+  shrinking `search` cut candidates per query 36x (949 → 26) but grew the
+  cells walked per query 1000x (8 → 7 913), because the cell shrank with it.
+  Below about 5 mm the second swamped the first and asking for a tighter
+  search radius made the whole sweep *slower*.
+
+  Query boxes are a tool bounding box plus `search`, so the tool's own width
+  is what the grid should be sized against. For a luer tip that is the 11 mm
+  collar, giving 2.75 mm cells — within noise of the 2.5 mm that measured
+  fastest. The housing is excluded: at 130 mm it would force cells so coarse
+  that every needle query returned the whole wake.
+
+Measured over the reference set, with every verdict and every worst clearance
+identical to 0.2.3:
+
+| toolpath | rows | 0.2.3 | 0.3.0 | |
+|---|---|---|---|---|
+| 360-180 SMOL Middle | 36 305 | 626 s | 252 s | 2.5x |
+| 360-180 SMOL Middle (1) | 36 305 | 577 s | 261 s | 2.2x |
+| test_infill | 2 674 | 7.3 s | 1.0 s | 7.2x |
+| REDO WOW Slab | 2 674 | 7.8 s | 3.6 s | 2.2x |
+| slab_infill | 2 674 | 7.2 s | 3.8 s | 1.9x |
+| small_slab | 1 747 | 3.0 s | 2.3 s | 1.3x |
+| LightPipeRobotTest | 1 170 | 0.8 s | 0.7 s | 1.1x |
+
+Timings are from one laptop and vary with what else it is doing; treat the
+ratios as indicative, not as a benchmark.
+
 ## [0.2.3] — 2026-09-18
 
 Touching is not penetrating. Reported collision counts change.

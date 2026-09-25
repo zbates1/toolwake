@@ -119,7 +119,7 @@ class Result:
 
 
 def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
-             threshold: float = 5e-4, search: float = 0.02,
+             threshold: float = 5e-4, search: float = 0.002,
              bead_radius: float | None = None, bead_drop: float = 0.0,
              progress=None) -> Result:
     """Run the wake simulation over `path`.
@@ -130,8 +130,18 @@ def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
         lag: rows of immunity behind the nozzle. Material laid within this many
             rows is not treated as an obstacle.
         threshold: clearance below which a row counts as "close", metres.
-        search: broad-phase radius, metres. Beads beyond this are not measured;
-            raise it if the housing is large.
+        search: broad-phase radius, metres. Beads beyond this are not measured,
+            so a clearance larger than `search` comes back as `inf`.
+
+            Detection is unaffected as long as this exceeds the bead radius,
+            which it does by more than an order of magnitude; what it bounds is
+            how far away a clearance is still worth reporting a number for.
+
+            It was 0.02 (20 mm), which on a 10 mm part meant the query box
+            covered the whole thing and the spatial hash could prune nothing —
+            949 candidate beads per query against a wake of 2 046. Measured
+            across three real files, dropping it to 2 mm is 1.9x to 5.1x
+            faster with identical verdicts and identical worst clearances.
         bead_radius: radius of the laid bead, metres. Defaults to the needle's
             bore radius, which assumes the bead keeps the round cross-section
             it had inside the needle.
@@ -171,10 +181,22 @@ def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
     r_bead = needle.bead_radius if bead_radius is None else float(bead_radius)
     if r_bead < 0:
         raise ValueError("bead_radius must be >= 0")
-    # The grid only exists to shrink the candidate set, so scale it to the
-    # query, not the bead — see Deposit.__init__.
-    dep = Deposit(bead_radius=r_bead,
-                  cell=max(search / 4.0, 8.0 * r_bead))
+    # Cell size follows the TOOL, not the search radius. Tying it to `search`
+    # welded two opposing costs to one knob: shrinking `search` cut candidates
+    # per query 36x (949 -> 26) but grew the cells walked per query 1000x
+    # (8 -> 7 913), because the cell shrank with it. Below about 5 mm the
+    # second swamped the first and shrinking the search radius made the whole
+    # sweep SLOWER.
+    #
+    # The query boxes are a tool bounding box plus `search`, so the tool's own
+    # width is what the grid should be sized against. For a luer tip that is
+    # the 11 mm collar, giving 2.75 mm cells — within noise of the 2.5 mm that
+    # measured fastest. The housing is deliberately excluded: at 130 mm it
+    # would force cells so coarse that every needle query returned the whole
+    # wake, and its own query is already bounded by the occupied-cell count.
+    span = 2.0 * max((sec.r_max for sec in needle.profile.sections),
+                     default=r_bead)
+    dep = Deposit(bead_radius=r_bead, cell=max(span / 4.0, 8.0 * r_bead))
     n = len(path)
     clearance = np.full(n, np.inf)
     culprit = np.full(n, -1, dtype=int)
