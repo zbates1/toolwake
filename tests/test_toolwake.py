@@ -968,11 +968,16 @@ def test_grid_cell_does_not_follow_the_search_radius():
 
     assert wide.deposit.cell == tight.deposit.cell, (
         f"cell moved with search: {wide.deposit.cell} vs {tight.deposit.cell}")
+    assert wide.deposit.coarse_cell == tight.deposit.coarse_cell
 
-    # And it should be sized against the tool's own width — the collar, here.
+    # The coarse grid is sized against the tool's own width — the collar,
+    # here — and the fine grid against the needle tip.
     span = 2.0 * max(sec.r_max for sec in needle.profile.sections)
-    expected = max(span / 4.0, 8.0 * needle.bead_radius)
-    assert wide.deposit.cell == pytest.approx(expected)
+    coarse = max(span / 4.0, 8.0 * needle.bead_radius)
+    tip = 2.0 * needle.profile.sections[0].r_max
+    assert wide.deposit.coarse_cell == pytest.approx(coarse)
+    assert wide.deposit.cell == pytest.approx(
+        min(max(2.0 * tip, 8.0 * needle.bead_radius), coarse))
 
     # Narrowing the search must not change the verdict, only the work done.
     assert wide.n_hits == tight.n_hits
@@ -1001,3 +1006,134 @@ def test_narrowing_the_search_radius_prunes_work():
 
     assert seen["tight"] < seen["wide"], (
         f"tight search measured {seen['tight']} points, wide {seen['wide']}")
+
+
+# ------------------------------------------------------------- search tiers
+def _brute_force_clearance(res, search):
+    """Every row against every earlier bead, no grid at all — the reference.
+
+    Same narrow phase as `Deposit.clearance` (ends and midpoint of each bead,
+    minus its radius), same part order and tie rule, same `inf` past `search`.
+    """
+    dep, path = res.deposit, res.path
+    A, B, T = dep._a, dep._b, dep._t
+    out = np.full(len(path), np.inf)
+    src = np.full(len(path), "", dtype=object)
+    for i in range(len(path)):
+        keep = T < i - res.lag
+        if not keep.any():
+            continue
+        pts = np.vstack([A[keep], B[keep], 0.5 * (A[keep] + B[keep])])
+        rv = None if path.rotvec is None else path.rotvec[i]
+        best, who = np.inf, ""
+        for name, shape in res.needle.at(path.xyz[i], rv).named_shapes():
+            d = float(np.min(shape.distance(pts))) - dep.bead_radius
+            if d < best:
+                best, who = d, name
+        if best <= search:
+            out[i], src[i] = best, who
+    return out, src
+
+
+def _layered_fixture():
+    """Two raster layers, travel at several heights, then a plunge into them.
+
+    Built so every search tier is the one that answers some row: the first
+    layer sees only its neighbouring lines (~55 um), the second sits tangent
+    on the first (0), travel rows hang 0.3 / 0.9 / 1.6 mm over the top, one
+    row is out of range entirely, and the plunge penetrates.
+    """
+    h = 1e-4
+    xs = np.linspace(0, 2e-3, 21)
+    lines = [np.column_stack([xs if k % 2 == 0 else xs[::-1],
+                              np.full(21, y), np.zeros(21)])
+             for k, y in enumerate(np.linspace(0, 1e-3, 6))]
+    layer = np.vstack(lines)
+    hover = np.array([[1e-3, 5e-4, h + dz] for dz in (3e-4, 9e-4, 1.6e-3, 5e-3)])
+    plunge = np.column_stack([np.linspace(0, 2e-3, 21), np.full(21, 5e-4),
+                              np.full(21, h / 2)])
+    xyz = np.vstack([layer, layer + [0, 0, h], hover, plunge])
+    kinds = ([PRINT] * (2 * len(layer)) + [TRAVEL] * len(hover)
+             + [TRAVEL] + [PRINT] * (len(plunge) - 1))
+    return Toolpath(xyz, kinds=kinds), h
+
+
+def test_tiered_search_matches_a_brute_force_reference():
+    """Searching small radii first must not change a single row.
+
+    A row stops at the first radius that finds material, so this is only safe
+    if a result inside its radius is exact and nothing farther can undercut
+    it. Checked against the grid-free reference rather than against the old
+    single-radius search, because the old search is what is being replaced.
+    """
+    from toolwake.simulate import _search_radii
+
+    path, h = _layered_fixture()
+    needle = Needle.luer(inner_d=90e-6, housing=(0.130, 0.075, 0.072))
+    search = 2e-3
+    res = simulate(path, needle, lag=4, threshold=0.0, search=search,
+                   bead_radius=h / 2, bead_drop=h / 2)
+    ref, src = _brute_force_clearance(res, search)
+
+    assert np.array_equal(np.isinf(res.clearance), np.isinf(ref))
+    fin = np.isfinite(ref)
+    np.testing.assert_allclose(res.clearance[fin], ref[fin], rtol=0, atol=1e-12)
+    assert list(res.source[fin]) == list(src[fin])
+
+    # The fixture has to reach every radius, or this proves less than it says.
+    radii = _search_radii(search, res.deposit.cell)
+    assert len(radii) >= 3, radii
+    bands = [0.0] + radii
+    for lo, hi in zip(bands, bands[1:]):
+        assert np.any((ref > lo) & (ref <= hi)), f"no row in ({lo}, {hi}]"
+    assert res.n_hits > 0 and np.any(np.isinf(ref))
+
+
+def test_clearance_beyond_search_is_inf():
+    """Past `search` the answer is inf — not whatever the grid handed back.
+
+    A coarse cell can hold material a little beyond `search`, and the single
+    search used to report it as a distance on some rows and inf on others,
+    depending only on where the cell boundaries fell.
+    """
+    # 2.5 mm up is past a 2 mm search but inside the luer's 2.75 mm coarse
+    # cells, so the grid does hand that bead back; it must still read inf.
+    path = Toolpath(np.array([[0.0, 0.0, 0.0], [1e-3, 0.0, 0.0],
+                              [5e-4, 0.0, 1.5e-3], [5e-4, 0.0, 2.5e-3]]),
+                    kinds=[TRAVEL, PRINT, TRAVEL, TRAVEL])
+    res = simulate(path, Needle.luer(inner_d=90e-6), lag=0, search=2e-3)
+    # The bead's midpoint is under the bore, so the nearest solid is the
+    # bore's edge, 45 um off-axis.
+    assert res.clearance[2] == pytest.approx(np.hypot(45e-6, 1.5e-3) - 45e-6)
+    assert res.clearance[3] == float("inf")
+    assert res.culprit[3] == -1 and res.source[3] == ""
+
+
+def test_long_bead_is_filed_by_its_measured_points():
+    """A long diagonal must cost the grid a few cells, not its bounding box.
+
+    Filed by bounding box, a 200 mm diagonal at needle-sized cells touched
+    some 150 000 cells — for a bead whose ends and midpoint, the only points
+    ever measured, fit in 24.
+    """
+    d = Deposit(bead_radius=45e-6, cell=4e-4)
+    d.add([0.0, 0.0, 0.0], [0.14, 0.14, 0.0], frame=0)
+    assert len(d._grid) <= 3 * 8
+
+
+def test_hub_sized_query_uses_the_coarse_grid():
+    """A hub-sized box must not walk, or scan, the needle-sized grid."""
+    d = Deposit(bead_radius=45e-6, cell=4e-4, coarse_cell=2.75e-3)
+    rng = np.random.default_rng(0)
+    for i, a in enumerate(rng.uniform(0, 0.05, size=(2000, 3)) * [1, 1, 0]):
+        d.add(a, a + [5e-4, 0, 0], frame=i)
+
+    hub = Capsule([0.025, 0.025, 0.0], [0.025, 0.025, 0.013], 4.5e-3)
+    lo, hi = hub.bounds(pad=0.0)
+    d._candidates(lo, hi)
+    coarse_box = 1
+    for x in np.floor(hi / d.coarse_cell) - np.floor(lo / d.coarse_cell) + 1:
+        coarse_box *= int(x)
+    assert d.last_probe <= coarse_box
+    assert d.last_probe < len(d._grid) / 10, (
+        f"probed {d.last_probe} cells of a {len(d._grid)}-cell fine grid")

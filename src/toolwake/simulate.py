@@ -38,6 +38,31 @@ __all__ = ["Result", "simulate"]
 # this models, so nothing physical can hide beneath it.
 CONTACT_TOL = 1e-12
 
+# Successive search radii grow by this factor, starting from half a fine cell.
+_SEARCH_GROWTH = 4.0
+
+
+def _search_radii(search: float, cell: float) -> list[float]:
+    """Radii each row is searched at, smallest first, ending at `search`.
+
+    A row stops at the first radius that finds something inside it, and most
+    rows need only the first. A nozzle printing a layer sits tangent to the one
+    beneath it, so its nearest material is at zero — and a 2 mm search around
+    a 0.19 mm needle on a 10 mm part measured a quarter of everything laid so
+    far to learn that, on every row. Travel moves and the first layer, with
+    nothing close, pay for the wider passes.
+
+    The first radius is half a fine cell because nothing smaller is cheaper:
+    the query rounds out to whole cells either way. Starting at 31 um saved
+    almost nothing — 108 beads per query against 130 at 125 um — and sent 46%
+    of rows round a second time.
+    """
+    radii, rho = [], 0.5 * cell
+    while rho < search:
+        radii.append(rho)
+        rho *= _SEARCH_GROWTH
+    return radii + [search]
+
 
 @dataclass
 class Result:
@@ -130,12 +155,17 @@ def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
         lag: rows of immunity behind the nozzle. Material laid within this many
             rows is not treated as an obstacle.
         threshold: clearance below which a row counts as "close", metres.
-        search: broad-phase radius, metres. Beads beyond this are not measured,
-            so a clearance larger than `search` comes back as `inf`.
+        search: broad-phase radius, metres. A clearance larger than `search`
+            comes back as `inf`; anything inside it is exact.
 
             Detection is unaffected as long as this exceeds the bead radius,
             which it does by more than an order of magnitude; what it bounds is
             how far away a clearance is still worth reporting a number for.
+
+            It is the LARGEST radius searched, not the one every row pays for:
+            each row tries `_search_radii` up to it, smallest first, and stops
+            at the first that finds material. So widening it costs only the
+            rows with nothing nearby.
 
             It was 0.02 (20 mm), which on a 10 mm part meant the query box
             covered the whole thing and the spatial hash could prune nothing —
@@ -194,9 +224,18 @@ def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
     # measured fastest. The housing is deliberately excluded: at 130 mm it
     # would force cells so coarse that every needle query returned the whole
     # wake, and its own query is already bounded by the occupied-cell count.
+    #
+    # That is now the COARSE grid, for the hub and housing. With the widening
+    # search below, the common query is the needle tip at a fraction of a
+    # millimetre, and a 2.75 mm cell around it hands back every bead in a
+    # 5 mm cube to answer it. The fine grid is sized to the tip instead.
     span = 2.0 * max((sec.r_max for sec in needle.profile.sections),
                      default=r_bead)
-    dep = Deposit(bead_radius=r_bead, cell=max(span / 4.0, 8.0 * r_bead))
+    coarse = max(span / 4.0, 8.0 * r_bead)
+    tip = 2.0 * needle.profile.sections[0].r_max
+    fine = min(max(2.0 * tip, 8.0 * r_bead), coarse)
+    dep = Deposit(bead_radius=r_bead, cell=fine, coarse_cell=coarse)
+    radii = _search_radii(search, fine)
     n = len(path)
     clearance = np.full(n, np.inf)
     culprit = np.full(n, -1, dtype=int)
@@ -206,14 +245,29 @@ def simulate(path: Toolpath, needle: Needle | None = None, *, lag: int = 8,
         rv = None if path.rotvec is None else path.rotvec[i]
         pose = needle.at(path.xyz[i], rv)
 
-        best, who, which = np.inf, "", -1
-        # Every section of the profile, plus the housing. Reporting WHICH part
-        # was closest is the point: "hub" and "cannula" call for different
-        # fixes, and a single "needle" label hides that.
-        for name, shape in pose.named_shapes():
-            d, j = dep.clearance(shape, frame=i, lag=lag, search=search)
-            if d < best:
-                best, who, which = d, name, j
+        shapes = pose.named_shapes()
+        # Smallest radius first. A result inside the radius it was searched at
+        # is exact — every bead that close was measured — and no other part of
+        # the tool can be closer, or that radius would have found it too. A
+        # row whose nearest material is beyond `search` reports inf, as
+        # documented; it used to report whatever the grid happened to return.
+        #
+        # Each radius starts from scratch rather than carrying the last one's
+        # best, so ties between parts break in profile order exactly as a
+        # single search at full radius would.
+        for rho in radii:
+            best, who, which = np.inf, "", -1
+            # Every section of the profile, plus the housing. Reporting WHICH
+            # part was closest is the point: "hub" and "cannula" call for
+            # different fixes, and a single "needle" label hides that.
+            for name, shape in shapes:
+                d, j = dep.clearance(shape, frame=i, lag=lag, search=rho)
+                if d < best:
+                    best, who, which = d, name, j
+            if best <= rho:
+                break
+        else:
+            best, who, which = np.inf, "", -1
         clearance[i] = best
         culprit[i] = which
         source[i] = who

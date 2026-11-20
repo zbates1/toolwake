@@ -4,6 +4,36 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Performance. Every row's clearance, the culprit part and the verdict are
+unchanged on every file tested — compared row by row against 0.3.0 on six
+synthetic paths (two non-planar) and all five real G-code files.
+
+### Changed
+- **Each row searches a small radius first.** Rows are searched at half a
+  fine cell (0.19 mm for a 34G tip), widening x4 towards `search` only when
+  nothing is that close. A nozzle laying a layer sits on the one beneath it,
+  so most rows stop at the first radius. Searching all of `search` on every
+  row cost time in proportion to the material already laid, which made a
+  small, dense part quadratic in its row count. Measured back to back against
+  0.3.0: 6.9–7.1x faster on a 36 305-row, 11 mm part; 5.9x on the first
+  60 000 rows of a 240 mm tray.
+- **Two grids.** A fine one sized to the needle tip for the common query, and
+  the old tool-sized one for the hub, collar and housing. One grid sized for
+  either made the other pay: fine cells left hub queries scanning every
+  occupied cell, coarse cells handed the needle every bead in a 5 mm cube.
+- **Queries that miss everything laid so far skip the grid.** On a planar
+  print that is the hub, collar and housing on every row.
+- **Beads are filed by the points the narrow phase measures** — ends and
+  midpoint — not by their whole bounding box, which for a long diagonal
+  infill line was quadratic in its length.
+
+### Fixed
+- **A clearance beyond `search` is now always `inf`**, as 0.3.0 documented.
+  It sometimes reported a finite number instead, whenever a coarse grid cell
+  happened to reach a bead past `search`: 1 942 of 36 305 rows on one part.
+
 ## [0.3.0] — 2026-09-24
 
 Performance. Verdicts are unchanged on every file tested; reported clearances
