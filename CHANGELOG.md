@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-11-20
 
 Performance. Every row's clearance, the culprit part and the verdict are
 unchanged on every file tested — compared row by row against 0.3.0 on six
