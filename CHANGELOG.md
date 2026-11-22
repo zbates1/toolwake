@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] — 2026-11-22
 
 Correctness. Reported clearances change — they can only go DOWN, towards the
 truth: compared row by row against 0.4.0 on six synthetic paths and four real
