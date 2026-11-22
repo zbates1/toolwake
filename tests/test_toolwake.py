@@ -11,7 +11,7 @@ import pytest
 
 from toolwake import (Box, Capsule, Deposit, Needle, Toolpath, simulate,
                       rotation_from_rotvec)
-from toolwake.geometry import rotvec_from_axis
+from toolwake.geometry import Cylinder, rotvec_from_axis
 from toolwake.toolpath import PRINT, TRAVEL
 
 
@@ -833,11 +833,17 @@ def test_bead_cannot_be_taller_than_its_layer():
     # which is why this fixture has to be offset to reproduce anything.
     pitch = 85e-6
     assert bore_r < pitch < 95e-6, "pitch must put the bead under the wall"
+    # Each layer starts with a TRAVEL move. As a print move, the jump from the
+    # end of layer one back to the start of layer two lays a 13 mm diagonal
+    # bead climbing between the layers, and layer two's nozzle passes over it
+    # where it is still most of a layer high: a real penetration in this bead
+    # model, -0.0099 mm. Measuring beads only at their ends and middle hid it
+    # until 0.5.0; this fixture is about the raster, not that.
     pts, kinds = [], []
     for k, z in enumerate((layer, 2 * layer)):
         for x in range(14):
             pts.append((x * 1e-3, k * pitch, z))
-            kinds.append(PRINT)
+            kinds.append(PRINT if x else TRAVEL)
     path = Toolpath.from_arrays(np.array(pts), kinds=np.array(kinds))
     needle = Needle(inner_d=2 * bore_r)
 
@@ -988,51 +994,61 @@ def test_narrowing_the_search_radius_prunes_work():
     path = Toolpath.helix(radius=0.01, pitch=1e-3, turns=3.0, per_turn=60)
     needle = Needle.luer(inner_d=90e-6)
 
+    # Points the narrow phase measures go through `_probe`.
     seen = {}
-    from toolwake.geometry import Cylinder
-    original = Cylinder.distance
+    original = Cylinder._probe
 
     def counted(self, pts, _key=None):
         seen[key] = seen.get(key, 0) + len(np.atleast_2d(pts))
         return original(self, pts)
 
     try:
-        Cylinder.distance = counted
+        Cylinder._probe = counted
         for key in ("wide", "tight"):
             simulate(path, needle, lag=4, threshold=0.0,
                      search=0.02 if key == "wide" else 0.001)
     finally:
-        Cylinder.distance = original
+        Cylinder._probe = original
 
     assert seen["tight"] < seen["wide"], (
         f"tight search measured {seen['tight']} points, wide {seen['wide']}")
 
 
 # ------------------------------------------------------------- search tiers
+_DENSE = 2e-6     # reference sample spacing along each bead, metres
+
+
 def _brute_force_clearance(res, search):
     """Every row against every earlier bead, no grid at all — the reference.
 
-    Same narrow phase as `Deposit.clearance` (ends and midpoint of each bead,
-    minus its radius), same part order and tie rule, same `inf` past `search`.
+    Each bead is sampled every `_DENSE` along its length, so the reference is
+    above the true minimum by at most half that. Returns the reference
+    clearance, the part it came from, and the margin by which that part beat
+    the next one — a source is only comparable where that margin is wider
+    than the reference's own error.
     """
     dep, path = res.deposit, res.path
     A, B, T = dep._a, dep._b, dep._t
+    n_s = np.maximum(np.ceil(np.linalg.norm(B - A, axis=1) / _DENSE), 1)
     out = np.full(len(path), np.inf)
     src = np.full(len(path), "", dtype=object)
+    margin = np.full(len(path), np.inf)
     for i in range(len(path)):
-        keep = T < i - res.lag
-        if not keep.any():
+        keep = np.flatnonzero(T < i - res.lag)
+        if not keep.size:
             continue
-        pts = np.vstack([A[keep], B[keep], 0.5 * (A[keep] + B[keep])])
+        pts = np.vstack([A[k] + np.linspace(0, 1, int(n_s[k]) + 1)[:, None]
+                         * (B[k] - A[k]) for k in keep])
         rv = None if path.rotvec is None else path.rotvec[i]
-        best, who = np.inf, ""
-        for name, shape in res.needle.at(path.xyz[i], rv).named_shapes():
-            d = float(np.min(shape.distance(pts))) - dep.bead_radius
-            if d < best:
-                best, who = d, name
+        per_part = [(float(np.min(shape.distance(pts))) - dep.bead_radius, name)
+                    for name, shape in res.needle.at(path.xyz[i], rv).named_shapes()]
+        per_part.sort(key=lambda x: x[0])
+        best, who = per_part[0]
         if best <= search:
             out[i], src[i] = best, who
-    return out, src
+            if len(per_part) > 1:
+                margin[i] = per_part[1][0] - best
+    return out, src, margin
 
 
 def _layered_fixture():
@@ -1063,9 +1079,14 @@ def test_tiered_search_matches_a_brute_force_reference():
 
     A row stops at the first radius that finds material, so this is only safe
     if a result inside its radius is exact and nothing farther can undercut
-    it. Checked against the grid-free reference rather than against the old
-    single-radius search, because the old search is what is being replaced.
+    it. Checked against a grid-free reference that samples every bead densely
+    along its length, rather than against any earlier version of the search.
+
+    The exact answer lies in [reference - _DENSE / 2, reference], and the
+    search's answer is a measured distance within _NARROW_TOL above the exact
+    one, so that is the band it must land in.
     """
+    from toolwake.deposit import _NARROW_TOL
     from toolwake.simulate import _search_radii
 
     path, h = _layered_fixture()
@@ -1073,12 +1094,15 @@ def test_tiered_search_matches_a_brute_force_reference():
     search = 2e-3
     res = simulate(path, needle, lag=4, threshold=0.0, search=search,
                    bead_radius=h / 2, bead_drop=h / 2)
-    ref, src = _brute_force_clearance(res, search)
+    ref, src, margin = _brute_force_clearance(res, search)
 
     assert np.array_equal(np.isinf(res.clearance), np.isinf(ref))
     fin = np.isfinite(ref)
-    np.testing.assert_allclose(res.clearance[fin], ref[fin], rtol=0, atol=1e-12)
-    assert list(res.source[fin]) == list(src[fin])
+    got, want = res.clearance[fin], ref[fin]
+    assert np.all(got >= want - _DENSE / 2 - 1e-15), np.min(got - want)
+    assert np.all(got <= want + _NARROW_TOL), np.max(got - want)
+    clear = fin & (margin > _DENSE)
+    assert list(res.source[clear]) == list(src[clear])
 
     # The fixture has to reach every radius, or this proves less than it says.
     radii = _search_radii(search, res.deposit.cell)
@@ -1102,23 +1126,109 @@ def test_clearance_beyond_search_is_inf():
                               [5e-4, 0.0, 1.5e-3], [5e-4, 0.0, 2.5e-3]]),
                     kinds=[TRAVEL, PRINT, TRAVEL, TRAVEL])
     res = simulate(path, Needle.luer(inner_d=90e-6), lag=0, search=2e-3)
-    # The bead's midpoint is under the bore, so the nearest solid is the
-    # bore's edge, 45 um off-axis.
-    assert res.clearance[2] == pytest.approx(np.hypot(45e-6, 1.5e-3) - 45e-6)
+    # The bead runs under the cannula wall, so the nearest solid is straight
+    # up: 1.5 mm, less the bead's radius. (0.4.0 measured only the bead's
+    # middle, under the bore, and reported the slant to the bore's edge.)
+    assert res.clearance[2] == pytest.approx(1.5e-3 - 45e-6, abs=1e-9)
     assert res.clearance[3] == float("inf")
     assert res.culprit[3] == -1 and res.source[3] == ""
 
 
-def test_long_bead_is_filed_by_its_measured_points():
-    """A long diagonal must cost the grid a few cells, not its bounding box.
+def test_long_bead_is_filed_along_its_length_not_its_box():
+    """A long diagonal costs the grid cells in proportion to its length.
 
     Filed by bounding box, a 200 mm diagonal at needle-sized cells touched
-    some 150 000 cells — for a bead whose ends and midpoint, the only points
-    ever measured, fit in 24.
+    some 150 000 cells. Filed only at its ends and midpoint, as 0.4.0 did, it
+    was invisible to a query anywhere else along it.
     """
-    d = Deposit(bead_radius=45e-6, cell=4e-4)
+    cell = 4e-4
+    d = Deposit(bead_radius=45e-6, cell=cell)
     d.add([0.0, 0.0, 0.0], [0.14, 0.14, 0.0], frame=0)
-    assert len(d._grid) <= 3 * 8
+    length_in_cells = np.hypot(0.14, 0.14) / cell
+    assert len(d._grid) <= 8 * length_in_cells          # ~5 000, not 150 000
+    # A third of the way along — neither end nor middle.
+    p = np.array([0.14, 0.14, 0.0]) / 3
+    assert list(d._candidates(p - 1e-4, p + 1e-4)) == [0]
+
+
+def test_long_bead_with_two_grids_is_found_by_a_fine_query():
+    """With two grids a long bead skips the fine one, and is still found.
+
+    Filing a 140 mm diagonal along its length at needle-sized cells costs
+    thousands of cells; it goes in the coarse grid only, and a query that
+    is answered from the fine grid must look it up there.
+    """
+    d = Deposit(bead_radius=45e-6, cell=4e-4, coarse_cell=2.75e-3)
+    d.add([0.0, 0.0, 0.0], [0.1, 0.1, 0.0], frame=0)          # long
+    d.add([0.05, 0.0, 0.0], [0.0502, 0.0, 0.0], frame=1)      # short
+    assert not any(0 in beads for beads in d._grid.values())
+    assert any(1 in beads for beads in d._grid.values())
+    p = np.array([0.1, 0.1, 0.0]) / 3
+    assert list(d._candidates(p - 1e-4, p + 1e-4)) == [0]
+    assert d.last_probe <= 8 + 8, "a fine query, not a coarse scan"
+
+
+def test_needle_in_the_middle_of_a_long_bead_is_caught():
+    """The case that measuring beads at ends and midpoint missed outright.
+
+    A 10 mm bead, and a cannula pushed down through it 2.5 mm from one end,
+    its wall straddling the bead's axis. 0.4.0 measured the bead at 0, 5 and
+    10 mm, found nothing within 2 mm, and reported clear.
+    """
+    r = 45e-6
+    d = Deposit(bead_radius=r, cell=4e-4, coarse_cell=2.75e-3)
+    d.add(np.zeros(3), np.array([10e-3, 0, 0]), frame=0)
+    # Axis 70 um off the bead's: the bead runs through the middle of a wall
+    # spanning 45..95 um, 25 um from either face of it.
+    tube = Cylinder([2.5e-3, 70e-6, -0.1e-3], [2.5e-3, 70e-6, 12e-3],
+                    radius=95e-6, inner_radius=45e-6)
+    c, j = d.clearance(tube, frame=1, search=2e-3)
+    assert j == 0
+    assert c == pytest.approx(-25e-6 - r, abs=1e-9)
+
+
+def test_solid_cylinder_axis_is_not_a_surface():
+    """Deep inside a solid section, depth is to the wall, not to the axis."""
+    hub = Cylinder([0, 0, 0], [0, 0, 13e-3], radius=4.5e-3)
+    on_axis = hub.distance([[0, 0, 6.5e-3]])[0]
+    near_axis = hub.distance([[1e-4, 0, 6.5e-3]])[0]
+    assert on_axis == pytest.approx(-4.5e-3)
+    assert near_axis == pytest.approx(-4.4e-3)
+
+
+@pytest.mark.parametrize("kind", ["box", "solid", "tube", "capsule"])
+def test_narrow_phase_matches_dense_sampling(kind):
+    """The minimum along a bead, against sampling it every 0.2 um.
+
+    The result must be a real distance (never below the dense reference by
+    more than the reference's own error) and within _NARROW_TOL above the
+    true minimum (never above the reference by more than that).
+    """
+    from toolwake.deposit import _NARROW_TOL, _min_along
+    from toolwake.geometry import rotation_from_rotvec
+
+    rng = np.random.default_rng(["box", "solid", "tube", "capsule"].index(kind))
+    step = 2e-7
+    for _ in range(25):
+        R = rotation_from_rotvec(rng.normal(size=3))
+        a = rng.normal(scale=1e-3, size=3)
+        if kind == "box":
+            shape = Box(a, rng.uniform(1e-4, 2e-3, 3), R)
+        elif kind == "capsule":
+            shape = Capsule(a, a + R[:, 2] * rng.uniform(0, 3e-3),
+                            rng.uniform(1e-5, 5e-4))
+        else:
+            ro = rng.uniform(5e-5, 1e-3)
+            ri = ro * rng.uniform(0.2, 0.9) if kind == "tube" else 0.0
+            shape = Cylinder(a, a + R[:, 2] * rng.uniform(5e-4, 5e-3), ro, ri)
+        A = rng.normal(scale=2e-3, size=(4, 3))
+        B = A + rng.normal(scale=3e-3, size=(4, 3))
+        got, _ = _min_along(shape, A, B, cutoff=np.inf)
+        dense = min(
+            shape.distance(A[i] + np.linspace(0, 1, int(np.linalg.norm(
+                B[i] - A[i]) / step) + 2)[:, None] * (B[i] - A[i])).min()
+            for i in range(len(A)))
+        assert dense - step / 2 - 1e-15 <= got <= dense + _NARROW_TOL
 
 
 def test_hub_sized_query_uses_the_coarse_grid():

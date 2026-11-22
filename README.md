@@ -98,11 +98,18 @@ false collision. `Toolpath.from_gcode` handles both `M82` and `M83`, because
 whether a row extrudes depends on it and slicers disagree — Cura emits `M82`,
 PrusaSlicer `M83`.
 
-**Two-phase queries.** A spatial hash narrows the candidate beads, then exact
-capsule/box distance measures against those only. A plain occupancy grid would
-give a binary answer quantised to the voxel size; this reports a real distance.
-There are two grids, one sized to the needle tip and one to the hub, because a
-single grid suits one of those queries and taxes the other.
+**Two-phase queries.** A spatial hash narrows the candidate beads, then the
+narrow phase finds the closest point along each of those, by branch and bound
+on the distance field: the reported clearance is a distance actually measured
+to a point on a bead, never below the true one and within a nanometre of it.
+A plain occupancy grid would give a binary answer quantised to the voxel size;
+this reports a real distance. There are two grids, one sized to the needle tip
+and one to the hub, because a single grid suits one of those queries and taxes
+the other.
+
+Measuring a bead only at its ends and middle — as 0.4.0 and earlier did — is
+blind to everything between: a needle pushed into a 10 mm bead 2.5 mm from one
+end reported clear.
 
 **Small radius first.** Each row is searched at a fraction of a millimetre and
 only widens towards `search` if nothing is that close. A nozzle laying a layer

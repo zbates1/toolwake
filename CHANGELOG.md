@@ -4,6 +4,51 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Correctness. Reported clearances change — they can only go DOWN, towards the
+truth: compared row by row against 0.4.0 on six synthetic paths and four real
+G-code files, no row reports more clearance than before, and no penetration
+count changed. Slower: see below.
+
+### Fixed
+- **A needle in the middle of a long bead was not seen.** Each bead was
+  measured at its two ends and its midpoint, and filed in the grid only
+  there. A cannula pushed into a 10 mm bead 2.5 mm from one end — its wall
+  straddling the bead — reported clear (`inf`); the true clearance is
+  -0.070 mm. Beads are now filed along their whole length, and the narrow
+  phase finds the closest point anywhere along each one: branch and bound
+  on the distance field, using its Lipschitz bound and, where the shape
+  provides one, a convex lower bound that settles flat and smooth minima in
+  a step or two. The result is a distance measured to a real point, never
+  below the truth and within 1 nm of it.
+
+  What it found that 0.4.0 missed, worst clearance per file: a non-planar
+  two-wall path -2.28 -> -4.19 mm (hub, same 243 rows penetrating);
+  `test_infill` +0.024 -> 0.000 mm; `LightPipeRobotTest` 0.022 -> 0.005 mm.
+  One test fixture had been hiding a real collision: a 13 mm diagonal laid
+  between two layers, which the second layer's nozzle cuts into by 9.9 um.
+- **A solid tool section treated its own axis as a surface.** For a section
+  with no bore (taper, hub, collar), depth inside it was measured to the
+  nearer of the wall and the AXIS, so a point on the axis deep inside the hub
+  read as touching (0) rather than 4.5 mm in.
+
+### Changed
+- `Capsule`, `Cylinder` and `Box` gain `_probe` (distance, a convex lower
+  bound on it, and the bound's gradient), and `Cylinder` gains `_hints`. A
+  shape with only `distance` still works, with the Lipschitz bound alone.
+- **With two grids, beads longer than eight fine cells are filed in the
+  coarse grid only**, and fine queries look them up there too. Filed along
+  their length at needle-sized cells, a 240 mm tray's infill put 1.5 million
+  cells in the fine grid in its first 20 000 rows; now 25 000.
+- **Slower, measured back to back against 0.4.0** (best of three; this
+  laptop's timings move +-30% between runs): 1.7-2.3x on the 36 305-row
+  SMOL part, 2.5-3.0x on the small slabs, 1.8x on LightPipe, 3.2x on the
+  first 60 000 rows of the 240 mm tray, whose long infill lines make the
+  most candidates. Still linear in row count, and still ahead of 0.3.0. The
+  cost is real work: whole beads are filed and measured where three points
+  were.
+
 ## [0.4.0] — 2026-11-20
 
 Performance. Every row's clearance, the culprit part and the verdict are
